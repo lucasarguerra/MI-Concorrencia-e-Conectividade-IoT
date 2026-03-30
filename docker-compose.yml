@@ -1,0 +1,50 @@
+services:
+
+  servidor:
+    build: ./servidor
+    ports:
+      - "12345:12345/udp"
+      - "12347:12347"
+    networks:
+      - rede_iot
+
+  sensor_temp:
+    build: ./sensor_temp
+    networks:
+      - rede_iot
+    depends_on:
+      - servidor
+
+  sensor_umidade:
+    build: ./sensor_umidade
+    networks:
+      - rede_iot
+    depends_on:
+      - servidor
+
+  atuador_vent:
+    build: ./atuador_vent
+    networks:
+      - rede_iot
+    depends_on:
+      - servidor
+
+  atuador_alarme:
+    build: ./atuador_alarme
+    networks:
+      - rede_iot
+    depends_on:
+      - servidor
+
+  cliente_monitoramento:
+    build: ./cliente_monitoramento
+    stdin_open: true
+    tty: true
+    networks:
+      - rede_iot
+    depends_on:
+      - servidor
+
+networks:
+  rede_iot:
+    driver: bridge
