@@ -29,13 +29,6 @@ services:
     depends_on:
       - servidor
 
-  atuador_alarme:
-    build: ./atuador_alarme
-    networks:
-      - rede_iot
-    depends_on:
-      - servidor
-
   cliente_monitoramento:
     build: ./cliente_monitoramento
     stdin_open: true
