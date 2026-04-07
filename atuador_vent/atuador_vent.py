@@ -10,7 +10,7 @@ while True:
         print("Tentando conectar ao servidor...")
 
         tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_socket.connect((SERVIDOR_HOST, SERVIDOR_PORT))
+        tcp_socket.connect(("localhost", SERVIDOR_PORT))
 
         tcp_socket.settimeout(5)  # 🔥 ESSENCIAL
 

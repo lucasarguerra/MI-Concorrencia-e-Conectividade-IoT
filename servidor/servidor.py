@@ -191,6 +191,72 @@ def envio_atuador(chave, acao):
         print(f"Erro ao comunicar com {chave}: {e}")
 
 
+def tratar_cliente(conn, addr):
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            mensagem = data.decode()
+
+            if mensagem.startswith("GET:"):
+                tipo_pedido = mensagem.split(":", 1)[1]
+                with lock:
+                    dado = valores.get(tipo_pedido)
+                if not dado:
+                    resposta = f"Nenhum dado de {tipo_pedido} ainda"
+                else:
+                    resposta = f"{tipo_pedido}: {dado['valor']}"
+                conn.sendall(resposta.encode())
+
+            elif mensagem.startswith("LIST:"):
+                tipo_lista = mensagem.split(":")[1]
+                if tipo_lista == "sensores":
+                    with lock:
+                        chaves = list(valores.keys())
+                    conn.sendall(json.dumps(chaves).encode())
+                elif tipo_lista == "atuadores":
+                    with lock_atuador:
+                        chaves = {
+                            k: status_atuadores.get(k, {}).get("estado", "sem modificação")
+                            for k in atuadores
+                        }
+                    conn.sendall(json.dumps(chaves).encode())
+
+            elif mensagem.startswith("ID:"):
+                tipo_lista = mensagem.split(":")[1]
+                if tipo_lista == "ventilador":
+                    with lock_atuador:
+                        array_vent = json.dumps(ids_ventilador)
+                    conn.sendall(array_vent.encode())
+
+            elif mensagem.startswith("CMD:"):
+                typ = mensagem.split(":")[1]
+                acao = mensagem.split(":")[2]
+                if typ.startswith("ventilador_"):
+                    t = threading.Thread(target=envio_atuador, args=(typ, acao), daemon=True)
+                    t.start()
+                else:
+                    conn.sendall(f"Atuador desconhecido: {typ}".encode())
+
+    except Exception as e:
+        print(f"Cliente {addr} desconectado: {e}")
+    finally:
+        conn.close()
+        print(f"Cliente {addr} encerrado.")
+
+
+def loop_tcp_clientes():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('0.0.0.0', 12348))
+    server.listen(5)
+    print("Servidor TCP aguardando clientes na porta 12348...")
+    while True:
+        conn, addr = server.accept()
+        t = threading.Thread(target=tratar_cliente, args=(conn, addr), daemon=True)
+        t.start()
+
 thread_tcp = threading.Thread(target=loop_tcp, daemon=True)
 thread_tcp.start()
 
@@ -200,6 +266,9 @@ thread_verifica.start()
 thread_verifica_atuador = threading.Thread(target=verificar_atuadores, daemon=True)
 thread_verifica_atuador.start()
 
+thread_tcp_clientes = threading.Thread(target=loop_tcp_clientes, daemon=True)
+thread_tcp_clientes.start()
+
 udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp_socket.bind(('0.0.0.0', 12345))
 print("Servidor UDP aguardando na porta 12345...")
@@ -208,17 +277,7 @@ while True:
     data, addr = udp_socket.recvfrom(1024)
     mensagem = data.decode()
 
-    if mensagem.startswith("GET:"):
-        tipo_pedido = mensagem.split(":", 1)[1]
-        with lock:
-            dado = valores.get(tipo_pedido)
-        if not dado:
-            resposta = f"Nenhum dado de {tipo_pedido} ainda"
-        else:
-            resposta = f"{tipo_pedido}: {dado['valor']}"
-        udp_socket.sendto(resposta.encode(), addr)
-
-    elif mensagem.startswith("REGISTRO:"):
+    if mensagem.startswith("REGISTRO:"):
         nome_sensor = mensagem.split(":")[1]
         if nome_sensor == "temperatura":
             id_temp = len(ids_temperatura) + 1
@@ -231,39 +290,6 @@ while True:
         else:
             print("Dado desconhecido")
 
-    elif mensagem.startswith("LIST:"):
-        tipo_lista = mensagem.split(":")[1]
-        if tipo_lista == "sensores":
-            with lock:
-                chaves = list(valores.keys())
-            resposta = json.dumps(chaves)
-            udp_socket.sendto(resposta.encode(), addr)
-        elif tipo_lista == "atuadores":
-            with lock_atuador:
-                chaves = {
-                    k: status_atuadores.get(k, {}).get("estado", "sem modificação")
-                    for k in atuadores
-                }
-            resposta = json.dumps(chaves)
-            udp_socket.sendto(resposta.encode(), addr)
-
-    elif mensagem.startswith("ID:"):
-        tipo_lista = mensagem.split(":")[1]
-        if tipo_lista == "ventilador":
-            with lock_atuador:
-                array_vent = json.dumps(ids_ventilador)
-            udp_socket.sendto(array_vent.encode(), addr
-            )
-
-    elif mensagem.startswith("CMD:"):
-        typ = mensagem.split(":")[1]
-        acao = mensagem.split(":")[2]
-        if typ.startswith("ventilador_"):
-            thread_cmd = threading.Thread(target=envio_atuador, args=(typ, acao), daemon=True)
-            thread_cmd.start()
-        else:
-            print(f"Atuador desconhecido: {typ}")
-    
     else:
         thread = threading.Thread(target=tratar_sensor, args=(data, addr), daemon=True)
         thread.start()
