@@ -2,12 +2,21 @@ import socket
 import time
 import threading
 import json
+import queue
+import sys
+
+sys.stdout.reconfigure(line_buffering=True)
+
+lock_ids = threading.Lock()
+contador_temp = 0
+contador_umid = 0
 
 valores = {}
 lock = threading.Lock()
 
-atuadores = {}        # "ventilador_1" → socket
-locks_individuais = {} # "ventilador_1" → lock
+atuadores = {}
+locks_individuais = {}
+filas_atuadores = {}
 
 status_atuadores = {}
 lock_atuador = threading.Lock()
@@ -16,28 +25,48 @@ ids_temperatura = []
 ids_umidade = []
 ids_ventilador = []
 
+fila_udp = queue.Queue()
+NUM_WORKERS_UDP = 4
+
+
+# ─── SENSORES UDP ────────────────────────────────────────────────────────────
 
 def tratar_sensor(data, addr):
-    mensagem = data.decode()
-    if ":" not in mensagem:
-        print(f"Mensagem inválida de {addr}: {mensagem}")
-        return
-    payload = json.loads(mensagem)
-    tipo = payload["tipo"]
-    sensor_id = payload["id"]
-    valor = payload["valor"]
-    chave = f"{tipo}_{sensor_id}"
-    with lock:
-        valores[chave] = {
-            "valor": valor,
-            "timestamp": time.time()
-        }
-    if tipo == "umidade":
-        print(f"Umidade {sensor_id} recebida: {valor}%")
-    elif tipo == "temperatura":
-        print(f"Temperatura {sensor_id} recebida: {valor}°C")
-    else:
-        print(f"Dado desconhecido [{tipo}]: {valor}")
+    try:
+        mensagem = data.decode()
+        if ":" not in mensagem:
+            print(f"Mensagem inválida de {addr}: {mensagem}")
+            return
+        payload = json.loads(mensagem)
+        tipo = payload["tipo"]
+        sensor_id = payload["id"]
+        valor = payload["valor"]
+        timestamp_msg = payload.get("timestamp", time.time())
+
+        if time.time() - timestamp_msg > 5:
+            return
+
+        chave = f"{tipo}_{sensor_id}"
+        with lock:
+            valores[chave] = {
+                "valor": valor,
+                "timestamp": time.time()
+            }
+        if tipo == "umidade":
+            print(f"Umidade {sensor_id} recebida: {valor}%")
+        elif tipo == "temperatura":
+            print(f"Temperatura {sensor_id} recebida: {valor}°C")
+        else:
+            print(f"Dado desconhecido [{tipo}]: {valor}")
+    except Exception as e:
+        print(f"Erro ao tratar sensor: {e}")
+
+
+def worker_udp():
+    while True:
+        data, addr = fila_udp.get()
+        tratar_sensor(data, addr)
+        fila_udp.task_done()
 
 
 def verificar_sensores():
@@ -48,15 +77,21 @@ def verificar_sensores():
             for chave in list(valores.keys()):
                 if agora - valores[chave]["timestamp"] > 5:
                     print(f"{chave} caiu!")
-                    tipo, sensor_id = chave.split("_")
-                    sensor_id = int(sensor_id)
-                    if tipo == "temperatura":
-                        if sensor_id in ids_temperatura:
+
+                    # Remove o ID da lista ao detectar queda
+                    partes = chave.split("_", 1)
+                    tipo = partes[0]
+                    sensor_id = int(partes[1])
+                    with lock_ids:
+                        if tipo == "temperatura" and sensor_id in ids_temperatura:
                             ids_temperatura.remove(sensor_id)
-                    elif tipo == "umidade":
-                        if sensor_id in ids_umidade:
+                        elif tipo == "umidade" and sensor_id in ids_umidade:
                             ids_umidade.remove(sensor_id)
+
                     del valores[chave]
+
+
+# ─── ATUADORES TCP ───────────────────────────────────────────────────────────
 
 def loop_tcp():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -70,18 +105,37 @@ def loop_tcp():
         partes = mensagem.split(":")
         if partes[0] == "CADASTRO" and partes[1] == "ventilador":
             with lock_atuador:
-                if len(ids_ventilador) == 0:
-                    atuador_id = 1
-                else: 
-                    atuador_id = ids_ventilador[len(ids_ventilador) - 1] + 1
+                atuador_id = (ids_ventilador[-1] + 1) if ids_ventilador else 1
                 ids_ventilador.append(atuador_id)
                 chave = f"ventilador_{atuador_id}"
                 atuadores[chave] = client_socket
                 locks_individuais[chave] = threading.Lock()
+                filas_atuadores[chave] = queue.PriorityQueue()
+
             client_socket.sendall(str(atuador_id).encode())
-            t = threading.Thread(target=heartbeat, args=(client_socket, chave), daemon=True)
-            t.start()
-        
+            print(f"Ventilador '{chave}' conectado.")
+
+            threading.Thread(target=heartbeat, args=(client_socket, chave), daemon=True).start()
+            threading.Thread(target=worker_atuador, args=(chave,), daemon=True).start()
+
+
+def worker_atuador(chave):
+    while True:
+        with lock_atuador:
+            fila = filas_atuadores.get(chave)
+        if fila is None:
+            break
+        try:
+            timestamp, acao = fila.get(timeout=1)
+        except queue.Empty:
+            with lock_atuador:
+                if chave not in atuadores:
+                    break
+            continue
+        envio_atuador(chave, acao)
+        fila.task_done()
+
+
 def heartbeat(client_socket, chave):
     while True:
         time.sleep(3)
@@ -93,7 +147,6 @@ def heartbeat(client_socket, chave):
         try:
             with lock_ind:
                 client_socket.sendall(b"PING")
-
                 client_socket.settimeout(5)
                 resposta = client_socket.recv(1024)
                 client_socket.settimeout(None)
@@ -101,7 +154,6 @@ def heartbeat(client_socket, chave):
                 if resposta != b"PONG":
                     break
 
-                # 🔥 ATUALIZA TIMESTAMP (ESSENCIAL)
                 with lock_atuador:
                     if chave in status_atuadores:
                         status_atuadores[chave]["timestamp"] = time.time()
@@ -109,7 +161,6 @@ def heartbeat(client_socket, chave):
         except Exception:
             break
 
-    # 🔥 CLEANUP
     tipo, atuador_id = chave.split("_")
     atuador_id = int(atuador_id)
 
@@ -120,13 +171,12 @@ def heartbeat(client_socket, chave):
             except:
                 pass
             del atuadores[chave]
-
         if chave in locks_individuais:
             del locks_individuais[chave]
-
         if chave in status_atuadores:
             del status_atuadores[chave]
-
+        if chave in filas_atuadores:
+            del filas_atuadores[chave]
         if atuador_id in ids_ventilador:
             ids_ventilador.remove(atuador_id)
 
@@ -138,35 +188,30 @@ def heartbeat(client_socket, chave):
     print(f"Ventilador '{chave}' desconectado.")
 
 
-
 def verificar_atuadores():
     while True:
         time.sleep(2)
         agora = time.time()
-
         with lock_atuador:
             for chave in list(status_atuadores.keys()):
                 if agora - status_atuadores[chave]["timestamp"] > 6:
                     print(f"{chave} caiu!")
-
                     if chave in atuadores:
                         try:
                             atuadores[chave].close()
                         except:
                             pass
                         del atuadores[chave]
-
                     if chave in locks_individuais:
                         del locks_individuais[chave]
-
                     if chave in status_atuadores:
                         del status_atuadores[chave]
-
+                    if chave in filas_atuadores:
+                        del filas_atuadores[chave]
                     tipo, atuador_id = chave.split("_")
                     atuador_id = int(atuador_id)
                     if atuador_id in ids_ventilador:
                         ids_ventilador.remove(atuador_id)
-
 
 
 def envio_atuador(chave, acao):
@@ -183,15 +228,18 @@ def envio_atuador(chave, acao):
         estado = confirmacao.split(":")[1]
         with lock_atuador:
             status_atuadores[chave] = {
-            "estado": estado,
-            "timestamp": time.time()
-        }
+                "estado": estado,
+                "timestamp": time.time()
+            }
         print(f"{chave} confirmou: {confirmacao}")
     except Exception as e:
         print(f"Erro ao comunicar com {chave}: {e}")
 
 
+# ─── CLIENTES TCP ─────────────────────────────────────────────────────────────
+
 def tratar_cliente(conn, addr):
+    print(f"Cliente conectado: {addr}")
     try:
         while True:
             data = conn.recv(4096)
@@ -229,13 +277,30 @@ def tratar_cliente(conn, addr):
                     with lock_atuador:
                         array_vent = json.dumps(ids_ventilador)
                     conn.sendall(array_vent.encode())
+                # CORRIGIDO: expõe IDs de sensores para o cliente
+                elif tipo_lista == "temperatura":
+                    with lock_ids:
+                        conn.sendall(json.dumps(ids_temperatura).encode())
+                elif tipo_lista == "umidade":
+                    with lock_ids:
+                        conn.sendall(json.dumps(ids_umidade).encode())
 
             elif mensagem.startswith("CMD:"):
-                typ = mensagem.split(":")[1]
-                acao = mensagem.split(":")[2]
+                partes = mensagem.split(":")
+                typ = partes[1]
+                acao = partes[2]
+                try:
+                    ts = float(partes[3]) if len(partes) > 3 else time.time()
+                except (ValueError, IndexError):
+                    ts = time.time()
+
                 if typ.startswith("ventilador_"):
-                    t = threading.Thread(target=envio_atuador, args=(typ, acao), daemon=True)
-                    t.start()
+                    with lock_atuador:
+                        fila = filas_atuadores.get(typ)
+                    if fila is not None:
+                        fila.put((ts, acao))
+                    else:
+                        conn.sendall(f"Atuador '{typ}' não conectado.".encode())
                 else:
                     conn.sendall(f"Atuador desconhecido: {typ}".encode())
 
@@ -254,22 +319,21 @@ def loop_tcp_clientes():
     print("Servidor TCP aguardando clientes na porta 12348...")
     while True:
         conn, addr = server.accept()
-        t = threading.Thread(target=tratar_cliente, args=(conn, addr), daemon=True)
-        t.start()
+        threading.Thread(target=tratar_cliente, args=(conn, addr), daemon=True).start()
 
-thread_tcp = threading.Thread(target=loop_tcp, daemon=True)
-thread_tcp.start()
 
-thread_verifica = threading.Thread(target=verificar_sensores, daemon=True)
-thread_verifica.start()
+# ─── INICIALIZAÇÃO ────────────────────────────────────────────────────────────
 
-thread_verifica_atuador = threading.Thread(target=verificar_atuadores, daemon=True)
-thread_verifica_atuador.start()
+for _ in range(NUM_WORKERS_UDP):
+    threading.Thread(target=worker_udp, daemon=True).start()
 
-thread_tcp_clientes = threading.Thread(target=loop_tcp_clientes, daemon=True)
-thread_tcp_clientes.start()
+threading.Thread(target=loop_tcp, daemon=True).start()
+threading.Thread(target=verificar_sensores, daemon=True).start()
+threading.Thread(target=verificar_atuadores, daemon=True).start()
+threading.Thread(target=loop_tcp_clientes, daemon=True).start()
 
 udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
 udp_socket.bind(('0.0.0.0', 12345))
 print("Servidor UDP aguardando na porta 12345...")
 
@@ -279,17 +343,16 @@ while True:
 
     if mensagem.startswith("REGISTRO:"):
         nome_sensor = mensagem.split(":")[1]
-        if nome_sensor == "temperatura":
-            id_temp = len(ids_temperatura) + 1
-            ids_temperatura.append(id_temp)
-            udp_socket.sendto(str(id_temp).encode(), addr)
-        elif nome_sensor == "umidade":
-            id_umid = len(ids_umidade) + 1
-            ids_umidade.append(id_umid)
-            udp_socket.sendto(str(id_umid).encode(), addr)
-        else:
-            print("Dado desconhecido")
-
+        with lock_ids:
+            if nome_sensor == "temperatura":
+                contador_temp += 1
+                ids_temperatura.append(contador_temp)
+                udp_socket.sendto(str(contador_temp).encode(), addr)
+            elif nome_sensor == "umidade":
+                contador_umid += 1
+                ids_umidade.append(contador_umid)
+                udp_socket.sendto(str(contador_umid).encode(), addr)
+            else:
+                print("Sensor desconhecido")
     else:
-        thread = threading.Thread(target=tratar_sensor, args=(data, addr), daemon=True)
-        thread.start()
+        fila_udp.put((data, addr))
