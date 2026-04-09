@@ -34,14 +34,17 @@ NUM_WORKERS_UDP = 4
 def tratar_sensor(data, addr):
     try:
         mensagem = data.decode()
-        if ":" not in mensagem:
-            print(f"Mensagem inválida de {addr}: {mensagem}")
-            return
         payload = json.loads(mensagem)
-        tipo = payload["tipo"]
-        sensor_id = payload["id"]
-        valor = payload["valor"]
+
+        # Validação dos campos obrigatórios
+        tipo = payload.get("tipo")
+        sensor_id = payload.get("id")
+        valor = payload.get("valor")
         timestamp_msg = payload.get("timestamp", time.time())
+
+        if not all([tipo, sensor_id, valor is not None]):
+            print(f"Payload inválido de {addr}: {payload}")
+            return
 
         if time.time() - timestamp_msg > 5:
             return
@@ -78,7 +81,6 @@ def verificar_sensores():
                 if agora - valores[chave]["timestamp"] > 5:
                     print(f"{chave} caiu!")
 
-                    # Remove o ID da lista ao detectar queda
                     partes = chave.split("_", 1)
                     tipo = partes[0]
                     sensor_id = int(partes[1])
@@ -277,7 +279,6 @@ def tratar_cliente(conn, addr):
                     with lock_atuador:
                         array_vent = json.dumps(ids_ventilador)
                     conn.sendall(array_vent.encode())
-                # CORRIGIDO: expõe IDs de sensores para o cliente
                 elif tipo_lista == "temperatura":
                     with lock_ids:
                         conn.sendall(json.dumps(ids_temperatura).encode())
@@ -289,16 +290,13 @@ def tratar_cliente(conn, addr):
                 partes = mensagem.split(":")
                 typ = partes[1]
                 acao = partes[2]
-                try:
-                    ts = float(partes[3]) if len(partes) > 3 else time.time()
-                except (ValueError, IndexError):
-                    ts = time.time()
 
                 if typ.startswith("ventilador_"):
                     with lock_atuador:
                         fila = filas_atuadores.get(typ)
                     if fila is not None:
-                        fila.put((ts, acao))
+                        # Prioridade 0: comandos de controle têm prioridade máxima
+                        fila.put((0, acao))
                     else:
                         conn.sendall(f"Atuador '{typ}' não conectado.".encode())
                 else:
