@@ -201,7 +201,7 @@ Ao abrir o cliente, você verá o menu principal:
 ║  [1]  Consultar sensores                 ║
 ║  [2]  Enviar comando ao ventilador       ║
 ║  [3]  Ver estado dos ventiladores        ║
-║  [4]  Sair do sistema                   ║
+║  [4]  Sair do sistema                    ║
 ╚══════════════════════════════════════════╝
 ```
 
