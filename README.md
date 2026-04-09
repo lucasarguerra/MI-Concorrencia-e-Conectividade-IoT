@@ -23,6 +23,9 @@ pblredes/
 ├── cliente_monitoramento/
 │   ├── cliente_monitoramento.py
 │   └── Dockerfile
+├── cliente_teste/
+│   ├── cliente_teste.py
+│   └── Dockerfile
 └── docker-compose.yml
 ```
 
@@ -30,7 +33,7 @@ pblredes/
 
 ## Pacotes e dependências
 
-O projeto usa apenas bibliotecas da **biblioteca padrão do Python 3.12** — nenhuma dependência externa precisa ser instalada:
+O projeto usa só a **biblioteca padrão do Python 3.12** — nenhuma dependência externa precisa ser instalada:
 
 | Biblioteca | Uso |
 |------------|-----|
@@ -53,7 +56,7 @@ O projeto usa apenas bibliotecas da **biblioteca padrão do Python 3.12** — ne
                                  └──TCP──► [cliente_monitoramento]
 ```
 
-Cada componente roda em seu próprio container Docker e se comunica com o servidor central. Os sensores usam UDP por ser leve e tolerante a perda de pacotes; os atuadores e clientes usam TCP por precisarem de entrega garantida e estado de conexão.
+Cada componente roda em seu próprio container Docker e se comunica com o servidor central. Os sensores usam UDP por ser leve e tolerante a perda de pacotes; os atuadores e clientes usam TCP porque precisam de entrega garantida e estado de conexão.
 
 ---
 
@@ -67,9 +70,9 @@ O servidor é o centro de tudo. Ele abre três portas em paralelo usando threads
 - **12347 TCP** — aceita conexão dos ventiladores (atuadores)
 - **12348 TCP** — aceita conexão dos clientes de monitoramento
 
-Internamente, o servidor usa um pool de 4 workers para processar os pacotes UDP em paralelo, evitando gargalo quando vários sensores mandam dados ao mesmo tempo. Cada valor recebido é guardado em um dicionário com timestamp, e uma thread de background verifica a cada 2 segundos se algum sensor parou de enviar dados — se o último pacote tiver mais de 5 segundos, o sensor é considerado inativo e removido da lista.
+Internamente, o servidor usa um pool de 4 workers para processar os pacotes UDP em paralelo, evitando gargalo quando vários sensores mandam dados ao mesmo tempo. Cada valor recebido é guardado em um dicionário com timestamp, e uma thread de background checa a cada 2 segundos se algum sensor parou de enviar dados — se o último pacote tiver mais de 5 segundos, o sensor é marcado como inativo e removido da lista.
 
-Para os atuadores, o servidor mantém uma `PriorityQueue` por ventilador, um lock individual por conexão e uma thread de heartbeat dedicada. O heartbeat manda `PING` a cada 3 segundos e aguarda `PONG`; se não receber, o ventilador é removido automaticamente e todos os seus recursos são liberados.
+Para os atuadores, o servidor mantém uma `PriorityQueue` por ventilador, um lock individual por conexão e uma thread de heartbeat dedicada. O heartbeat manda `PING` a cada 3 segundos e aguarda `PONG`; se não receber resposta, o ventilador é removido automaticamente e todos os seus recursos são liberados.
 
 ### Sensores (`sensor_temp.py` e `sensor_umidade.py`)
 
@@ -83,7 +86,7 @@ O servidor descarta automaticamente qualquer pacote com timestamp mais de 5 segu
 
 ### Atuador (`atuador_vent.py`)
 
-O ventilador conecta via TCP na porta 12347 e manda `CADASTRO:ventilador`. O servidor registra a conexão, gera um ID e devolve pro atuador. A partir daí o ventilador fica em modo passivo esperando comandos: responde `PONG` nos pings de heartbeat, `OK:LIGADO` no comando `LIGAR` e `OK:DESLIGADO` no comando `DESLIGAR`. Se a conexão cair por qualquer motivo, o atuador tenta reconectar automaticamente a cada 3 segundos.
+O ventilador conecta via TCP na porta 12347 e manda `CADASTRO:ventilador`. O servidor registra a conexão, gera um ID e devolve pro atuador. A partir daí o ventilador fica em modo passivo esperando comandos: responde `PONG` nos pings de heartbeat, `OK:LIGADO` no comando `LIGAR` e `OK:DESLIGADO` no comando `DESLIGAR`. Se a conexão cair por qualquer motivo, o atuador tenta reconectar a cada 3 segundos.
 
 ### Cliente de monitoramento (`cliente_monitoramento.py`)
 
@@ -94,7 +97,7 @@ O cliente conecta diretamente ao servidor na porta 12348 e oferece um menu inter
 - **Ver estado dos ventiladores** — exibe o estado atual (ligado/desligado) de todos os ventiladores
 - **Sair**
 
-O monitoramento em tempo real roda numa thread separada, permitindo que o terminal seja retomado pelo usuário a qualquer momento ao pressionar ENTER.
+O monitoramento em tempo real roda numa thread separada, permitindo que o terminal seja retomado a qualquer momento ao pressionar ENTER.
 
 ### Protocolo de comunicação (porta 12348)
 
@@ -112,7 +115,7 @@ Os clientes se comunicam com o servidor usando um protocolo textual simples:
 
 ## Dockerfile
 
-Cada componente tem seu próprio Dockerfile. Todos seguem a mesma estrutura, variando apenas o script copiado e executado. Exemplo do atuador:
+Cada componente tem seu próprio Dockerfile. Todos seguem a mesma estrutura, variando só o script copiado e executado. Exemplo do atuador:
 
 ```dockerfile
 FROM python:3.12-slim
@@ -121,7 +124,7 @@ COPY atuador_vent.py .
 CMD ["python", "atuador_vent.py"]
 ```
 
-Nenhuma instalação adicional de pacotes é necessária pois o projeto usa exclusivamente a biblioteca padrão do Python.
+Nenhuma instalação adicional de pacotes é necessária.
 
 ---
 
@@ -179,7 +182,7 @@ docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-atuador_vent
 docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-cliente_monitoramento:1.0
 ```
 
-> `172.16.103.12` representa o IP real da máquina onde o servidor está rodando.
+> `172.16.103.12` é o IP real da máquina onde o servidor está rodando.
 
 Para acessar o cliente após subir o container:
 
@@ -215,6 +218,79 @@ Ao abrir o cliente, você verá o menu principal:
 
 ---
 
+## Cliente de testes (`cliente_teste.py`)
+
+O `cliente_teste.py` é um script separado feito pra estressar o sistema e verificar o comportamento em cenários de concorrência. Ele **não substitui** o cliente de monitoramento — serve exclusivamente pra testes manuais durante o desenvolvimento.
+
+### Como executar
+
+Com o sistema rodando (servidor + pelo menos um ventilador conectado), acesse o container do cliente de testes:
+
+```bash
+docker exec -it <nome_do_container_teste> bash
+python cliente_teste.py
+```
+
+Se estiver rodando fora do Docker, basta executar diretamente:
+
+```bash
+python cliente_teste.py
+```
+
+Por padrão, o script conecta em `localhost:12348`. Se o servidor estiver em outra máquina, defina a variável de ambiente antes de rodar:
+
+```bash
+SERVIDOR_HOST=172.16.103.12 python cliente_teste.py
+```
+
+### Menu de testes
+
+```
+====================
+     MENU TESTE
+====================
+[1] Testar concorrência atuadores
+[2] Testar concorrência sensores
+[3] Sair do sistema.
+```
+
+**Opção 1 — Testar concorrência de atuadores**
+
+Envia múltiplos comandos simultâneos para o `ventilador_1`. Útil pra verificar se a `PriorityQueue` e os locks individuais estão funcionando corretamente sob carga.
+
+Ao escolher essa opção, você verá um submenu:
+
+```
+[1] Testar com comandos alternados.
+[2] Testar com comandos contínuos.
+```
+
+- **Comandos alternados:** envia N comandos intercalando `LIGAR` e `DESLIGAR` (índices pares ligam, ímpares desligam). Bom pra checar se a ordem de execução é respeitada.
+- **Comandos contínuos:** sorteia uma ação (`LIGAR` ou `DESLIGAR`) e envia N vezes a mesma. Bom pra verificar idempotência e ausência de race conditions.
+
+Em ambos os casos, o script pede o número de comandos, dispara todas as threads ao mesmo tempo e aguarda todas terminarem antes de retornar ao menu. O estado final do ventilador deve ser conferido diretamente nos logs do servidor.
+
+**Opção 2 — Testar concorrência de sensores**
+
+Reservada para testes de carga nos sensores (ainda não implementado no script atual).
+
+**Opção 3 — Sair**
+
+Encerra o script.
+
+### O que observar nos logs do servidor
+
+Após rodar um teste de atuadores, procure nos logs do servidor mensagens como:
+
+```
+ventilador_1 confirmou: OK:LIGADO
+ventilador_1 confirmou: OK:DESLIGADO
+```
+
+A quantidade de confirmações deve bater com o número de comandos enviados. Se algum comando se perder ou a ordem parecer estranha, pode indicar problema nos locks ou na fila de prioridade.
+
+---
+
 ## Imagens disponíveis no Docker Hub
 
 | Imagem | Função |
@@ -239,14 +315,14 @@ Ao abrir o cliente, você verá o menu principal:
 
 ## Decisões de implementação
 
-**UDP para sensores** — sensores mandam dados em alta frequência e uma leitura perdida ocasionalmente não é crítica. UDP elimina o overhead de conexão e confirmação, sendo mais adequado para telemetria contínua.
+**UDP para sensores** — sensores mandam dados em alta frequência e uma leitura perdida ocasionalmente não é crítica. UDP elimina o overhead de conexão e confirmação, sendo mais adequado pra telemetria contínua.
 
 **TCP para atuadores e clientes** — comandos de controle precisam de entrega garantida. Um `LIGAR` ou `DESLIGAR` perdido teria consequências reais, então TCP é a escolha correta aqui.
 
-**Heartbeat ativo** — em vez de depender só de exceções de socket, o servidor verifica ativamente se cada ventilador ainda está vivo. Isso detecta casos onde a conexão "parece" ativa mas o processo do outro lado travou ou foi encerrado abruptamente.
+**Heartbeat ativo** — em vez de depender só de exceções de socket, o servidor verifica ativamente se cada ventilador ainda está vivo. Isso detecta casos onde a conexão "parece" ativa mas o processo do outro lado travou ou foi encerrado de forma abrupta.
 
-**PriorityQueue por atuador** — os comandos são enfileirados com prioridade, permitindo que comandos urgentes sejam processados antes de outros. Também garante que comandos não se percam mesmo se o atuador estiver ocupado processando outro.
+**PriorityQueue por atuador** — os comandos são enfileirados com prioridade, o que garante que comandos urgentes sejam processados antes de outros e que nenhum comando se perca mesmo se o atuador estiver ocupado.
 
-**Workers UDP** — o pool de 4 threads para processar pacotes UDP evita que o loop principal de recepção bloqueie enquanto processa um pacote mais lento. Pacotes continuam sendo recebidos enquanto os anteriores ainda estão sendo tratados.
+**Workers UDP** — o pool de 4 threads pra processar pacotes UDP evita que o loop principal de recepção bloqueie enquanto processa um pacote mais lento. Pacotes continuam sendo recebidos enquanto os anteriores ainda estão sendo tratados.
 
 **Locks individuais por conexão** — cada atuador tem seu próprio lock além do lock global. Isso permite que comandos para ventiladores diferentes sejam enviados em paralelo sem contenção desnecessária.
