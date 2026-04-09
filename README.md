@@ -129,7 +129,7 @@ Nenhuma instalação adicional de pacotes é necessária pois o projeto usa excl
 
 ### Pré-requisitos
 
-- Dockerinstalado
+- Docker instalado
 - Docker Compose instalado (já incluso no Docker Desktop)
 
 ### Rodando em uma única máquina (Docker Compose)
