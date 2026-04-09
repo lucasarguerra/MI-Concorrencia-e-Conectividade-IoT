@@ -7,24 +7,26 @@ import sys
 
 sys.stdout.reconfigure(line_buffering=True)
 
+
+# locks e contadores pra controlar os ids dos sensores
 lock_ids = threading.Lock()
 contador_temp = 0
 contador_umid = 0
-
+# dicionário que guarda os últimos valores recebidos dos sensores
 valores = {}
 lock = threading.Lock()
-
+# dicionário de conexões ativas dos atuadores, locks individuais e filas de comando
 atuadores = {}
 locks_individuais = {}
 filas_atuadores = {}
-
+# guarda o estado atual de cada atuador (ligado/desligado) e o timestamp do último sinal
 status_atuadores = {}
 lock_atuador = threading.Lock()
-
+# listas de ids registrados por tipo
 ids_temperatura = []
 ids_umidade = []
 ids_ventilador = []
-
+# fila compartilhada pra processar os pacotes udp com múltiplos workers
 fila_udp = queue.Queue()
 NUM_WORKERS_UDP = 4
 
@@ -37,18 +39,19 @@ def tratar_sensor(data, addr):
         payload = json.loads(mensagem)
 
         # Validação dos campos obrigatórios
+        # puxa os campos do payload
         tipo = payload.get("tipo")
         sensor_id = payload.get("id")
         valor = payload.get("valor")
         timestamp_msg = payload.get("timestamp", time.time())
-
+ # descarta se algum campo obrigatório estiver faltando
         if not all([tipo, sensor_id, valor is not None]):
             print(f"Payload inválido de {addr}: {payload}")
             return
-
+  # descarta pacotes com mais de 5 segundos de atraso
         if time.time() - timestamp_msg > 5:
             return
-
+# salva o valor mais recente desse sensor
         chave = f"{tipo}_{sensor_id}"
         with lock:
             valores[chave] = {
@@ -66,6 +69,7 @@ def tratar_sensor(data, addr):
 
 
 def worker_udp():
+    # fica em loop pegando pacotes da fila e processando
     while True:
         data, addr = fila_udp.get()
         tratar_sensor(data, addr)
@@ -74,16 +78,19 @@ def worker_udp():
 
 def verificar_sensores():
     while True:
+        # roda em background checando se algum sensor parou de mandar dados
         time.sleep(2)
         agora = time.time()
         with lock:
             for chave in list(valores.keys()):
+                # se o último dado tem mais de 5s, considera que o sensor caiu
                 if agora - valores[chave]["timestamp"] > 5:
                     print(f"{chave} caiu!")
 
                     partes = chave.split("_", 1)
                     tipo = partes[0]
                     sensor_id = int(partes[1])
+                     # remove o id da lista correspondente
                     with lock_ids:
                         if tipo == "temperatura" and sensor_id in ids_temperatura:
                             ids_temperatura.remove(sensor_id)
@@ -96,6 +103,7 @@ def verificar_sensores():
 # ─── ATUADORES TCP ───────────────────────────────────────────────────────────
 
 def loop_tcp():
+     # servidor que aceita conexões dos ventiladores
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(('0.0.0.0', 12347))
@@ -106,6 +114,7 @@ def loop_tcp():
         mensagem = client_socket.recv(1024).decode()
         partes = mensagem.split(":")
         if partes[0] == "CADASTRO" and partes[1] == "ventilador":
+            # gera um id sequencial pra esse ventilador
             with lock_atuador:
                 atuador_id = (ids_ventilador[-1] + 1) if ids_ventilador else 1
                 ids_ventilador.append(atuador_id)
@@ -114,14 +123,16 @@ def loop_tcp():
                 locks_individuais[chave] = threading.Lock()
                 filas_atuadores[chave] = queue.PriorityQueue()
 
+               # manda o id de volta pro ventilador
             client_socket.sendall(str(atuador_id).encode())
             print(f"Ventilador '{chave}' conectado.")
-
+               # sobe uma thread pra heartbeat e outra pra processar os comandos
             threading.Thread(target=heartbeat, args=(client_socket, chave), daemon=True).start()
             threading.Thread(target=worker_atuador, args=(chave,), daemon=True).start()
 
 
 def worker_atuador(chave):
+    # consome comandos da fila e manda pro atuador
     while True:
         with lock_atuador:
             fila = filas_atuadores.get(chave)
@@ -130,6 +141,7 @@ def worker_atuador(chave):
         try:
             timestamp, acao = fila.get(timeout=1)
         except queue.Empty:
+             # se a fila tá vazia e o atuador foi removido, encerra
             with lock_atuador:
                 if chave not in atuadores:
                     break
@@ -139,6 +151,7 @@ def worker_atuador(chave):
 
 
 def heartbeat(client_socket, chave):
+    # manda PING a cada 3s pra saber se o ventilador ainda tá vivo
     while True:
         time.sleep(3)
 
@@ -155,14 +168,14 @@ def heartbeat(client_socket, chave):
 
                 if resposta != b"PONG":
                     break
-
+                 # atualiza o timestamp do último sinal recebido
                 with lock_atuador:
                     if chave in status_atuadores:
                         status_atuadores[chave]["timestamp"] = time.time()
 
         except Exception:
             break
-
+    # chegou aqui: ventilador não respondeu, limpa tudo
     tipo, atuador_id = chave.split("_")
     atuador_id = int(atuador_id)
 
@@ -191,11 +204,13 @@ def heartbeat(client_socket, chave):
 
 
 def verificar_atuadores():
+    # checagem periódica baseada em timestamp, complementar ao heartbeat
     while True:
         time.sleep(2)
         agora = time.time()
         with lock_atuador:
             for chave in list(status_atuadores.keys()):
+                 # se passou mais de 6s sem atualização, considera morto
                 if agora - status_atuadores[chave]["timestamp"] > 6:
                     print(f"{chave} caiu!")
                     if chave in atuadores:
@@ -220,6 +235,7 @@ def envio_atuador(chave, acao):
     with lock_atuador:
         conn = atuadores.get(chave)
         lock = locks_individuais.get(chave)
+        # manda o comando e espera a confirmação
     if conn is None:
         print(f"Atuador '{chave}' não conectado.")
         return
@@ -228,6 +244,7 @@ def envio_atuador(chave, acao):
             conn.sendall(acao.encode())
             confirmacao = conn.recv(1024).decode()
         estado = confirmacao.split(":")[1]
+        # salva o estado atual e atualiza o timestamp
         with lock_atuador:
             status_atuadores[chave] = {
                 "estado": estado,
@@ -248,7 +265,7 @@ def tratar_cliente(conn, addr):
             if not data:
                 break
             mensagem = data.decode()
-
+             # retorna o valor mais recente de um sensor específico
             if mensagem.startswith("GET:"):
                 tipo_pedido = mensagem.split(":", 1)[1]
                 with lock:
@@ -258,7 +275,7 @@ def tratar_cliente(conn, addr):
                 else:
                     resposta = f"{tipo_pedido}: {dado['valor']}"
                 conn.sendall(resposta.encode())
-
+            # lista sensores ativos ou atuadores e seus estados
             elif mensagem.startswith("LIST:"):
                 tipo_lista = mensagem.split(":")[1]
                 if tipo_lista == "sensores":
@@ -272,7 +289,7 @@ def tratar_cliente(conn, addr):
                             for k in atuadores
                         }
                     conn.sendall(json.dumps(chaves).encode())
-
+  # retorna os ids registrados de um tipo específico
             elif mensagem.startswith("ID:"):
                 tipo_lista = mensagem.split(":")[1]
                 if tipo_lista == "ventilador":
@@ -285,7 +302,7 @@ def tratar_cliente(conn, addr):
                 elif tipo_lista == "umidade":
                     with lock_ids:
                         conn.sendall(json.dumps(ids_umidade).encode())
-
+  # enfileira um comando pra um atuador específico
             elif mensagem.startswith("CMD:"):
                 partes = mensagem.split(":")
                 typ = partes[1]
@@ -310,6 +327,7 @@ def tratar_cliente(conn, addr):
 
 
 def loop_tcp_clientes():
+    # servidor que aceita conexões dos clientes (dashboard, testes, etc)
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(('0.0.0.0', 12348))
@@ -324,12 +342,12 @@ def loop_tcp_clientes():
 
 for _ in range(NUM_WORKERS_UDP):
     threading.Thread(target=worker_udp, daemon=True).start()
-
+# threads de background pra cada responsabilidade
 threading.Thread(target=loop_tcp, daemon=True).start()
 threading.Thread(target=verificar_sensores, daemon=True).start()
 threading.Thread(target=verificar_atuadores, daemon=True).start()
 threading.Thread(target=loop_tcp_clientes, daemon=True).start()
-
+# socket udp principal que recebe registros e dados dos sensores
 udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
 udp_socket.bind(('0.0.0.0', 12345))

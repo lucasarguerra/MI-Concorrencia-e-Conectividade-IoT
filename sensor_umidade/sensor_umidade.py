@@ -10,6 +10,7 @@ udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 host = os.getenv("SERVIDOR_HOST", "servidor")
 address = (host, 12345)
+# registra e recebe o id
 udp_socket.sendto("REGISTRO:umidade".encode(), address)
 resposta, addr = udp_socket.recvfrom(1024)
 sensor_id = resposta.decode()

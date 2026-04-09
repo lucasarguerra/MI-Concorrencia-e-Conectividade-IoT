@@ -40,6 +40,7 @@ while True:
                     tcp_socket.sendall("OK:DESLIGADO".encode())
 
             except socket.timeout:
+                # timeout bateu sem nenhum ping, reconecta
                 print("Sem resposta (timeout). Reconectando...")
                 break
 
