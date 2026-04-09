@@ -4,17 +4,56 @@ Sistema distribuído de monitoramento com sensores de temperatura e umidade, ven
 
 ---
 
-## Arquitetura geral
+## Estrutura de diretórios
 
-O sistema é composto por cinco tipos de componentes que se comunicam de forma independente:
+```
+pblredes/
+├── servidor/
+│   ├── servidor.py
+│   └── Dockerfile
+├── sensor_temp/
+│   ├── sensor_temp.py
+│   └── Dockerfile
+├── sensor_umidade/
+│   ├── sensor_umidade.py
+│   └── Dockerfile
+├── atuador_vent/
+│   ├── atuador_vent.py
+│   └── Dockerfile
+├── cliente_monitoramento/
+│   ├── cliente_monitoramento.py
+│   └── Dockerfile
+└── docker-compose.yml
+```
+
+---
+
+## Pacotes e dependências
+
+O projeto usa apenas bibliotecas da **biblioteca padrão do Python 3.12** — nenhuma dependência externa precisa ser instalada:
+
+| Biblioteca | Uso |
+|------------|-----|
+| `socket` | Comunicação UDP e TCP |
+| `threading` | Concorrência entre sensores, atuadores e clientes |
+| `json` | Serialização dos payloads |
+| `time` | Timestamps e delays |
+| `queue` | Fila de pacotes UDP e comandos de atuadores |
+| `os` | Leitura de variáveis de ambiente e limpeza de tela |
+| `random` | Geração de valores simulados nos sensores |
+
+---
+
+## Arquitetura geral
 
 ```
 [sensor_temp]  ──UDP──┐
-[sensor_umid]  ──UDP──┤──► [servidor] ──TCP──► [atuador_vent]
-                       └──────────────TCP──────► [cliente]
+[sensor_umid]  ──UDP──┴──► [servidor] ──TCP──► [atuador_vent]
+                                 │
+                                 └──TCP──► [cliente_monitoramento]
 ```
 
-Cada componente roda em seu próprio container Docker e se comunica com o servidor central via rede interna. Os sensores usam UDP por ser leve e tolerante a perda de pacotes; os atuadores e clientes usam TCP por precisarem de entrega garantida e estado de conexão.
+Cada componente roda em seu próprio container Docker e se comunica com o servidor central. Os sensores usam UDP por ser leve e tolerante a perda de pacotes; os atuadores e clientes usam TCP por precisarem de entrega garantida e estado de conexão.
 
 ---
 
@@ -44,11 +83,11 @@ O servidor descarta automaticamente qualquer pacote com timestamp mais de 5 segu
 
 ### Atuador (`atuador_vent.py`)
 
-O ventilador conecta via TCP na porta 12347 e manda uma mensagem de `CADASTRO:ventilador`. O servidor registra a conexão, gera um ID e devolve pro atuador. A partir daí o ventilador fica em modo passivo esperando comandos: responde `PONG` nos pings de heartbeat, `OK:LIGADO` no comando `LIGAR` e `OK:DESLIGADO` no comando `DESLIGAR`. Se a conexão cair por qualquer motivo, o atuador tenta reconectar automaticamente a cada 3 segundos.
+O ventilador conecta via TCP na porta 12347 e manda `CADASTRO:ventilador`. O servidor registra a conexão, gera um ID e devolve pro atuador. A partir daí o ventilador fica em modo passivo esperando comandos: responde `PONG` nos pings de heartbeat, `OK:LIGADO` no comando `LIGAR` e `OK:DESLIGADO` no comando `DESLIGAR`. Se a conexão cair por qualquer motivo, o atuador tenta reconectar automaticamente a cada 3 segundos.
 
 ### Cliente de monitoramento (`cliente_monitoramento.py`)
 
-O cliente conecta na porta 12348 e oferece um menu interativo no terminal com quatro funções:
+O cliente conecta diretamente ao servidor na porta 12348 e oferece um menu interativo no terminal com quatro funções:
 
 - **Monitorar sensores em tempo real** — consulta todos os sensores ativos a cada 2 segundos e exibe um gráfico ASCII no terminal com as últimas 20 leituras de cada sensor
 - **Enviar comando ao ventilador** — lista os ventiladores conectados e permite mandar `LIGAR` ou `DESLIGAR` para um específico
@@ -63,7 +102,6 @@ Os clientes se comunicam com o servidor usando um protocolo textual simples:
 
 | Comando | Resposta | Descrição |
 |---------|----------|-----------|
-| `REGISTRO:<tipo>` | ID numérico | Registra um sensor e recebe um ID |
 | `GET:<tipo>_<id>` | `<tipo>_<id>: <valor>` | Último valor de um sensor |
 | `LIST:sensores` | JSON array de chaves | Sensores ativos |
 | `LIST:atuadores` | JSON objeto com estados | Atuadores e seus estados |
@@ -72,20 +110,52 @@ Os clientes se comunicam com o servidor usando um protocolo textual simples:
 
 ---
 
-## Rodando em uma única máquina (Docker Compose)
+## Dockerfile
+
+Cada componente tem seu próprio Dockerfile. Todos seguem a mesma estrutura, variando apenas o script copiado e executado. Exemplo do atuador:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY atuador_vent.py .
+CMD ["python", "atuador_vent.py"]
+```
+
+Nenhuma instalação adicional de pacotes é necessária pois o projeto usa exclusivamente a biblioteca padrão do Python.
+
+---
+
+## Como executar
+
+### Pré-requisitos
+
+- [Docker](https://docs.docker.com/get-docker/) instalado
+- [Docker Compose](https://docs.docker.com/compose/) instalado (já incluso no Docker Desktop)
+
+### Rodando em uma única máquina (Docker Compose)
 
 Clone o repositório e suba tudo com:
 
 ```bash
+git clone https://github.com/lucasarguerra/pblredes
+cd pblredes
 docker compose up
 ```
 
 Isso já sobe o servidor, os sensores, o ventilador e o cliente juntos na mesma rede interna do Docker.
 
-Para entrar no cliente interativo depois que os containers estiverem rodando:
+### Acessando o cliente interativo
+
+Com os containers rodando, abra o terminal do cliente com:
 
 ```bash
-docker attach <nome_do_container_cliente>
+docker exec -it pblredes-cliente_monitoramento-1 bash
+```
+
+Dentro do container, execute o cliente:
+
+```bash
+python cliente_monitoramento.py
 ```
 
 ---
@@ -94,23 +164,54 @@ docker attach <nome_do_container_cliente>
 
 Nesse caso você usa `docker run` direto, passando o IP do servidor pela variável de ambiente `SERVIDOR_HOST`.
 
-**Primeiro sobe o servidor na máquina dele:**
+**Primeiro suba o servidor na máquina dele:**
 
 ```bash
 docker run -d -p 12345:12345/udp -p 12347:12347 -p 12348:12348 lucasarguerra/pblredes-servidor:1.0
 ```
 
-**Depois, nas outras máquinas, sobe os sensores, o atuador e o cliente apontando pro IP do servidor:**
+**Depois, nas outras máquinas, suba os sensores, o atuador e o cliente apontando pro IP do servidor:**
 
 ```bash
 docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-sensor_temp:1.0
 docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-sensor_umidade:1.0
 docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-atuador_vent:1.0
-docker run -it -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-cliente_monitoramento:1.0
+docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-cliente_monitoramento:1.0
 ```
 
-> Substitua `172.16.103.12` pelo IP real da máquina onde o servidor está rodando.  
-> O cliente usa `-it` porque precisa de terminal interativo para o menu funcionar.
+> Substitua `172.16.103.12` pelo IP real da máquina onde o servidor está rodando.
+
+Para acessar o cliente após subir o container:
+
+```bash
+docker exec -it <nome_ou_id_do_container_cliente> bash
+python cliente_monitoramento.py
+```
+
+---
+
+## Como usar o cliente
+
+Ao abrir o cliente, você verá o menu principal:
+
+```
+╔══════════════════════════════════════════╗
+║              MENU PRINCIPAL              ║
+╠══════════════════════════════════════════╣
+║  [1]  Consultar sensores                 ║
+║  [2]  Enviar comando ao ventilador       ║
+║  [3]  Ver estado dos ventiladores        ║
+║  [4]  Sair do sistema                   ║
+╚══════════════════════════════════════════╝
+```
+
+**Opção 1 — Consultar sensores:** inicia o monitoramento em tempo real. O terminal exibe o valor atual de cada sensor com um gráfico ASCII das últimas leituras. Pressione ENTER para voltar ao menu.
+
+**Opção 2 — Enviar comando ao ventilador:** lista os ventiladores conectados no momento e pede que você escolha um pelo ID. Em seguida, escolha `LIGAR` ou `DESLIGAR`. O comando é enfileirado e enviado ao atuador com confirmação.
+
+**Opção 3 — Ver estado dos ventiladores:** exibe uma tabela com todos os ventiladores conectados e seus estados atuais (`LIGADO` ou `DESLIGADO`).
+
+**Opção 4 — Sair:** encerra o cliente.
 
 ---
 
@@ -136,24 +237,15 @@ docker run -it -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-cliente_mon
 
 ---
 
-## O que o cliente consegue fazer
-
-- Monitorar todos os sensores ativos em tempo real com gráfico ASCII
-- Ver o estado atual de cada ventilador (ligado/desligado)
-- Mandar comando de ligar ou desligar para um ventilador específico
-- Listar todos os sensores e atuadores conectados no momento
-
----
-
 ## Decisões de implementação
 
-**UDP para sensores** — sensores mandam dados em alta frequência (intervalo de 1ms no código atual) e uma leitura perdida ocasionalmente não é crítica. UDP elimina o overhead de conexão e confirmação, sendo mais adequado para telemetria contínua.
+**UDP para sensores** — sensores mandam dados em alta frequência e uma leitura perdida ocasionalmente não é crítica. UDP elimina o overhead de conexão e confirmação, sendo mais adequado para telemetria contínua.
 
 **TCP para atuadores e clientes** — comandos de controle precisam de entrega garantida. Um `LIGAR` ou `DESLIGAR` perdido teria consequências reais, então TCP é a escolha correta aqui.
 
 **Heartbeat ativo** — em vez de depender só de exceções de socket, o servidor verifica ativamente se cada ventilador ainda está vivo. Isso detecta casos onde a conexão "parece" ativa mas o processo do outro lado travou ou foi encerrado abruptamente.
 
-**PriorityQueue por atuador** — os comandos são enfileirados com prioridade, permitindo que comandos urgentes (prioridade 0) sejam processados antes de outros. Também garante que comandos não se percam mesmo se o atuador estiver ocupado processando outro.
+**PriorityQueue por atuador** — os comandos são enfileirados com prioridade, permitindo que comandos urgentes sejam processados antes de outros. Também garante que comandos não se percam mesmo se o atuador estiver ocupado processando outro.
 
 **Workers UDP** — o pool de 4 threads para processar pacotes UDP evita que o loop principal de recepção bloqueie enquanto processa um pacote mais lento. Pacotes continuam sendo recebidos enquanto os anteriores ainda estão sendo tratados.
 
