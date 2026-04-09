@@ -179,7 +179,7 @@ docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-atuador_vent
 docker run -d -e SERVIDOR_HOST=172.16.103.12 lucasarguerra/pblredes-cliente_monitoramento:1.0
 ```
 
-> Substitua `172.16.103.12` pelo IP real da máquina onde o servidor está rodando.
+> `172.16.103.12` representa o IP real da máquina onde o servidor está rodando.
 
 Para acessar o cliente após subir o container:
 
